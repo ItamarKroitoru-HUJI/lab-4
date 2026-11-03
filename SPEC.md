@@ -32,7 +32,10 @@ across restarts (unless a cheap log file falls out naturally), hosting anywhere 
   `"quota"` probe (`max_tokens: 1`), session-title requests (no tools, structured JSON output),
   and "suggestion mode" requests sent after a turn ends. Each gets a recognisable label
   (probe / quota / title / suggestion / other). A side request that failed is an error first:
-  it stays visible even when side requests are hidden.
+  it stays visible even when side requests are hidden. A side request's summary says what it
+  produced (e.g. the title text), not its wrapper tags (`<session>`).
+- The dashboard's own browser requests (e.g. `/favicon.ico`) are answered locally, never
+  forwarded upstream and never shown as entries.
 - Exchanges are grouped by agent session (the `X-Claude-Code-Session-Id` header, also in
   `metadata.user_id`). With one session running this is invisible; with two, I can tell them
   apart.
@@ -79,7 +82,8 @@ harness-injected text (e.g. `<system-reminder>` blocks inside a user message). T
 used everywhere these appear.
 
 ### 2.6 Formatting
-- Long text (over ~20 lines) is collapsed with a "show all (N lines)" control.
+- Long text (over ~20 lines) is collapsed with a "show all (N lines)" control. Text is never
+  cut off without that control in view (tool results included).
 - JSON is pretty-printed, indented, monospaced, and collapsible per level.
 - Sections of a request are visually separate (headings, spacing, borders).
 - Copy button on every block.
@@ -171,7 +175,9 @@ Run the proxy, open the dashboard, then in another terminal start Claude Code th
 12. A failing Bash command (`is_error: true` in the tool result) is red both in its result and
     in the one-line summary of the exchange that carries it.
 13. Two requests sent at the same moment produce two separate, complete entries.
-14. The first entry of a session shows my prompt in its summary, not "(no new message)".
+14. The first entry of a session shows my prompt in its summary, not "(no new message)" and not
+    "system message (N chars)".
+15. Opening the dashboard adds no entry to the feed (no `/favicon.ico` 404 rows).
 
 ## 6. Open decisions
 
