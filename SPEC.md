@@ -31,7 +31,8 @@ across restarts (unless a cheap log file falls out naturally), hosting anywhere 
   harness sends them besides the main conversation (see §7): the `HEAD /api/hello` probe, the
   `"quota"` probe (`max_tokens: 1`), session-title requests (no tools, structured JSON output),
   and "suggestion mode" requests sent after a turn ends. Each gets a recognisable label
-  (probe / quota / title / suggestion / other).
+  (probe / quota / title / suggestion / other). A side request that failed is an error first:
+  it stays visible even when side requests are hidden.
 - Exchanges are grouped by agent session (the `X-Claude-Code-Session-Id` header, also in
   `metadata.user_id`). With one session running this is invisible; with two, I can tell them
   apart.
@@ -49,7 +50,10 @@ across restarts (unless a cheap log file falls out naturally), hosting anywhere 
    conversation. Expanded by default. This is usually my prompt or the tool results.
    A single user message can mix harness-injected text blocks (`<system-reminder>…`) with what I
    actually typed; my typed text is shown prominently and the injected blocks are labelled and
-   collapsed.
+   collapsed. Messages with role `system` inside `messages` are never the "new message": skip
+   them when looking for it. The summary of a session's first request shows my prompt.
+   When comparing with the previous request, ignore `cache_control` (the harness moves it to the
+   newest message every turn).
 5. **Request settings**: model, max_tokens, other top-level fields, headers. `authorization`
    and `x-api-key` values are **masked**. The page must never show a full token.
 
@@ -85,6 +89,8 @@ Number of requests, total input/output tokens, time per request, count of calls 
 Input tokens are shown as three numbers: uncached `input_tokens`, `cache_read_input_tokens`,
 `cache_creation_input_tokens`. With caching, `input_tokens` alone is tiny (often 2) and would
 make the totals look wrong. Optional: estimated cost.
+The totals cover the entries currently shown (after the side-request toggle and filters) and
+say so: "showing N of M".
 
 ### 2.8 Extras (if time allows, in this order)
 1. Filter by tool name and by message kind.
@@ -95,16 +101,26 @@ make the totals look wrong. Optional: estimated cost.
 ## 3. Integration and constraints
 
 - **One command to start**: `python3 proxy.py --port 8041` still starts the proxy, and it now
-  also serves the dashboard. The agent is pointed at the proxy exactly as before
+  also serves the dashboard at `http://localhost:8041/__monitor/` (same port; every other path
+  is forwarded as before). The agent is pointed at the proxy exactly as before
   (`ANTHROPIC_BASE_URL=http://localhost:8041 claude`).
+- **Code layout**: forwarding stays in `proxy.py`; capture, parsing and the web server go in a
+  new `monitor.py`; the page in `dashboard/` (HTML, CSS, JS).
+- **While building and testing, never use port 8041**: the user's own proxy and other builds may
+  be running on it. Pick a free port in 8050–8099 and pass it with `--port`.
 - **Forwarding must stay unchanged**: same bytes, same headers, reply streamed through chunk by
   chunk with no added buffering. The dashboard must never slow down or break the agent. If the
   capture or the dashboard fails, forwarding continues.
-- **No dependencies**: Python 3 standard library only; the page is plain HTML/CSS/JS with no
+- **No dependencies**: Python 3.9+ standard library only; the page is plain HTML/CSS/JS with no
   build step and no CDN, so it works offline.
 - **Localhost only**: everything binds to `127.0.0.1`.
-- **Live updates** are pushed to the page (no manual reload). A page opened mid-session first
-  shows everything captured so far.
+- **Live updates** are pushed to the page with Server-Sent Events (no manual reload, no
+  polling). A page opened mid-session first loads everything captured so far, then follows the
+  live stream, and resyncs after a reconnect.
+- **Side requests are recognised by content**, in one small commented function: any path other
+  than `/v1/messages` → probe; `max_tokens: 1` → quota; no tools and a JSON schema in
+  `output_config` → title; text containing `[SUGGESTION MODE` → suggestion; else main.
+- **Claude Code traffic only.** Other formats (e.g. Codex) are shown as raw JSON.
 - **Streaming replies are parsed**: the reply arrives as Server-Sent Events; the dashboard
   reassembles them into text blocks, tool calls (with their JSON input), thinking, stop reason
   and usage. Unknown event or block types are shown as raw JSON, not dropped and not a crash.
@@ -119,8 +135,10 @@ make the totals look wrong. Optional: estimated cost.
 
 ## 4. Why (the important choices)
 
-- Same process as the proxy: nothing extra to run in the lab, and the dashboard sees each
-  exchange the moment it happens. (Same port or a second one is still open, see §6.)
+- Same process and port as the proxy: nothing extra to run in the lab, and the dashboard sees
+  each exchange the moment it happens. API paths start with `/v1` or `/api`, so `/__monitor/`
+  cannot clash.
+- Errors win over hiding: a hidden failure is the thing I most need to see.
 - "New message" is separated from "conversation so far" because every request resends the
   whole history; without this, every entry looks almost the same.
 - Tool calls and results are paired because they arrive in different requests, which is
@@ -145,24 +163,26 @@ Run the proxy, open the dashboard, then in another terminal start Claude Code th
    exchange appears in red with the error text.
 9. A system prompt of ~1,000 words and a 160 KB request body render without freezing the page;
    long blocks start collapsed.
-10. The statistics bar's token totals equal the sum of the entries' usage numbers.
-11. Starting Claude Code shows the quota probe and the title request labelled as side requests;
-    hiding side requests leaves only the main turn's exchanges.
+10. The statistics bar's token totals equal the sum of the shown entries' usage numbers, and it
+    says "showing N of M".
+11. Starting an **interactive** Claude Code session (`claude -p` sends no title or suggestion
+    requests) shows the quota probe and the title request labelled as side requests; hiding
+    side requests leaves only the main turn's exchanges, plus any side request that failed.
 12. A failing Bash command (`is_error: true` in the tool result) is red both in its result and
     in the one-line summary of the exchange that carries it.
 13. Two requests sent at the same moment produce two separate, complete entries.
+14. The first entry of a session shows my prompt in its summary, not "(no new message)".
 
 ## 6. Open decisions
 
 | Decision | Depends on it | Answer by |
 | --- | --- | --- |
-| Dashboard on the same port under a path (e.g. `/__monitor`) or on a second port (e.g. 8042)? Same-port risks clashing with API paths. | proxy routing, how to open the page | first build |
-| Push mechanism: SSE from the server or polling? | live update code | first build |
-| Layout: one list with expanding entries, or list + detail pane? | whole UI | after first build |
-| How to recognise side requests: by content (no tools, `max_tokens: 1`, `[SUGGESTION MODE` prefix, title prompt), or a simpler rule? Content rules may break when the harness changes. | §2.1 labels | first build |
+| Layout: one list with expanding entries, or list + detail pane? (Builds so far: one list; one build put request left / reply right inside an entry.) | whole UI | after comparing builds |
 | How "new message" is computed when the history was compacted or reordered. | §2.2 item 4 | after a long session |
-| Support Codex traffic (OpenAI Responses format) as well, or Claude Code only? | parser | before lab |
 | Keep an append-only JSONL log on disk, so traffic survives a restart and can be re-opened? | persistence | optional |
+
+Settled by the first builds (now in §3): same port under `/__monitor/`, SSE, the `monitor.py`
+split, side requests by content, Claude Code only.
 
 ## 7. Observed traffic (Claude Code 2.1.311, one "read a file" turn)
 
